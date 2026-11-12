@@ -42,12 +42,16 @@ const getLocation = async () => {
         resolve(null);
         return;
       }
+      // Never wait forever: the Android WebView can sit on a permission prompt.
+      const giveUp = setTimeout(() => resolve(null), 9000);
       navigator.geolocation.getCurrentPosition(
-        (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude, heading: pos.coords.heading || 0 }),
+        (pos) => { clearTimeout(giveUp); resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude, heading: pos.coords.heading || 0 }); },
         (error) => {
+          clearTimeout(giveUp);
           console.log('[v0] getLocation: getCurrentPosition failed:', error.message);
           resolve(null);
-        }
+        },
+        { enableHighAccuracy: false, timeout: 8000, maximumAge: 120000 }
       );
     });
   }
@@ -56,7 +60,26 @@ const getLocation = async () => {
 const watchLocation = async (callback: (coords: { latitude: number; longitude: number; heading: number; speed: number; accuracy: number }) => void) => {
   if (isNative()) {
     const backgroundGeolocation = getBackgroundGeolocation();
-    const id = await backgroundGeolocation.addWatcher(
+    let gotFix = false;
+    let webWatchId: number | null = null;
+    const startWebWatch = () => {
+      if (webWatchId !== null || !navigator.geolocation) return;
+      console.log('[v0] Using WebView geolocation as fallback');
+      webWatchId = navigator.geolocation.watchPosition(
+        (pos) => callback({
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          heading: pos.coords.heading || 0,
+          speed: pos.coords.speed || 0,
+          accuracy: pos.coords.accuracy ?? Infinity,
+        }),
+        (error) => console.log('[v0] Fallback location error:', error.message),
+        { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 }
+      );
+    };
+    let id: string | null = null;
+    try {
+    id = await backgroundGeolocation.addWatcher(
       {
         backgroundMessage: 'Tracking your location while you are online',
         backgroundTitle: 'Aletwende Driver',
@@ -70,6 +93,7 @@ const watchLocation = async (callback: (coords: { latitude: number; longitude: n
           return;
         }
         if (!location) return;
+        gotFix = true;
         callback({
           latitude: location.latitude,
           longitude: location.longitude,
@@ -79,12 +103,22 @@ const watchLocation = async (callback: (coords: { latitude: number; longitude: n
         });
       }
     );
+    } catch (error: any) {
+      console.log('[v0] Background watcher failed, using WebView geolocation:', error?.message || error);
+      startWebWatch();
+    }
+    // If the native watcher is silent for 12 s, also listen through the WebView.
+    const silentTimer = setTimeout(() => { if (!gotFix) startWebWatch(); }, 12000);
     let removed = false;
     return {
       remove: async () => {
         if (removed) return;
         removed = true;
-        await backgroundGeolocation.removeWatcher({ id });
+        clearTimeout(silentTimer);
+        if (webWatchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(webWatchId);
+        if (id !== null) {
+          try { await backgroundGeolocation.removeWatcher({ id }); } catch { /* ignore */ }
+        }
       },
     };
   }
@@ -447,8 +481,9 @@ export default function Dashboard() {
       setIsOnline(nextOnline);
       onlineRef.current = nextOnline;
       if (data?.sessionId && data.sessionId !== sessionIdRef.current && nextOnline) {
-        setIsOnline(false);
-        onlineRef.current = false;
+        // Another instance owns this presence. Take it over instead of flipping off:
+        // the toggle must follow what the driver chose on THIS screen.
+        void update(ref(database, `drivers_online/${uid}`), { sessionId: sessionIdRef.current }).catch(() => {});
       }
       setIsPresenceLoaded(true);
     });
@@ -587,7 +622,7 @@ export default function Dashboard() {
 
   const startTracking = async () => {
     const uid = auth.currentUser?.uid;
-    if (!uid || !isOnline || locationSubscriptionRef.current) return;
+    if (!uid || !onlineRef.current || locationSubscriptionRef.current) return;
     if (trackingStartRef.current) return trackingStartRef.current;
 
     const trackingGeneration = trackingGenerationRef.current;
@@ -700,6 +735,8 @@ export default function Dashboard() {
     let cancelled = false;
     const seedAndStart = async () => {
       if (locationSubscriptionRef.current || trackingStartRef.current || cancelled) return;
+      // Start tracking FIRST when online; the map centring below must never block it.
+      if (isOnline) void startTracking();
       if (Platform.OS !== 'web') {
         try {
           const Location = await import('expo-location');
@@ -765,6 +802,10 @@ export default function Dashboard() {
       sessionId: sessionIdRef.current,
     });
 
+    // Start the live location watcher right away, in parallel with the one-shot fix below.
+    onlineRef.current = true;
+    void startTracking();
+
     let coords: any = await Promise.race([
       getLocation(),
       new Promise((resolve) => setTimeout(() => resolve(null), 6000)),
@@ -812,7 +853,13 @@ export default function Dashboard() {
 
     setIsOnline(true);
     onlineRef.current = true;
-    await startTracking();
+    try {
+      await startTracking();
+    } catch (error) {
+      // Location problems must not flip the driver back offline while the database says online.
+      console.log('[v0] startTracking failed after going online:', error);
+      setLocationPermissionDenied(true);
+    }
     return true;
   };
 
@@ -865,6 +912,11 @@ export default function Dashboard() {
         onlineRef.current = previousOnline;
         setIsOnline(previousOnline);
         animateSlider(previousOnline);
+        // Keep the database in step with what the driver sees.
+        try {
+          const failUid = auth.currentUser?.uid;
+          if (failUid && !previousOnline) await clearDriverPresence(failUid);
+        } catch { /* ignore */ }
       } finally {
         localTransitionRef.current = false;
         animateSlider(onlineRef.current);
@@ -1075,6 +1127,7 @@ if (activeTab === 'settings') {
         <DriverMap
           polyline={showPolyline ? activePolyline || undefined : undefined}
           vehiclePosition={vehiclePosition || undefined}
+          showVehicle={isOnline}
           vehicleType={vehicleType}
           vehicleColor={vehicleColor}
           markers={displayedMarkers}

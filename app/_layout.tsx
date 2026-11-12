@@ -1,6 +1,6 @@
 import '@/utils/polyfills';
 import { useEffect, useState, useRef } from 'react';
-import { Stack, usePathname } from 'expo-router';
+import { Stack, usePathname, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Pressable, StyleSheet } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -162,6 +162,7 @@ export default function RootLayout() {
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [verificationStatus, setVerificationStatus] = useState<string | null>(null);
   const pathname = usePathname();
+  const router = useRouter();
   
   // Listen for authentication state changes
   useEffect(() => {
@@ -188,6 +189,17 @@ export default function RootLayout() {
     return () => unsubscribe();
   }, [currentUser?.uid]);
   
+  // After logout the auth screens replace the signed-in screens, but the URL can still be
+  // /dashboard (a blank screen). Send the driver back to the login page.
+  useEffect(() => {
+    if (!isAuthReady || currentUser) return;
+    if (pathname === '/' || pathname === '') return;
+    const loggedOutPages = ['/registration-terms', '/personal-info', '/personal-picture', '/step2', '/step3', '/cyclist-step', '/license-step', '/driver-license-instructions', '/selfie-with-license-instructions', '/id-step', '/ridesDelivery', '/vehicle-information', '/chooseLocation', '/application-submitted', '/forgot-password'];
+    if (loggedOutPages.includes(pathname)) return;
+    const timer = setTimeout(() => { try { router.replace('/'); } catch { /* ignore */ } }, 50);
+    return () => clearTimeout(timer);
+  }, [isAuthReady, currentUser, pathname]);
+
   if (showSplash) {
     return <SplashScreen onFinish={() => {
       setShowSplash(false);

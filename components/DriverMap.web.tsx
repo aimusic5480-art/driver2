@@ -51,6 +51,8 @@ interface DriverMapProps {
   // the 20s idle auto-recenter. When false it centers on the vehicle on load and
   // auto-recenters after 20s idle. The user can always zoom/pan freely.
   hasActiveTrip?: boolean;
+  // false = keep centring on the driver but hide the vehicle (driver is offline)
+  showVehicle?: boolean;
   onMapReady?: () => void;
 }
 
@@ -85,6 +87,7 @@ export default function DriverMap({
   arrivalTime,
   arrivalPosition,
   hasActiveTrip,
+  showVehicle,
   onMapReady,
 }: DriverMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -284,6 +287,12 @@ export default function DriverMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [encodedPolyline]);
 
+  // Hide the vehicle while offline (the map still centres on the driver).
+  useEffect(() => {
+    const marker = vehicleMarkerRef.current;
+    if (marker) marker.getElement().style.display = showVehicle === false ? 'none' : '';
+  }, [showVehicle, vehiclePosition]);
+
   // ---- Update vehicle position (animated) + trim route ----
   useEffect(() => {
     const map = mapRef.current;
@@ -327,6 +336,7 @@ export default function DriverMap({
         vehicleMarkerRef.current = new maplibregl.Marker({ element: el })
           .setLngLat([lng, lat])
           .addTo(map);
+        if (showVehicle === false) vehicleMarkerRef.current.getElement().style.display = 'none';
         applyVehicleRotation(heading, vehicleType);
         centerOnce();
       } else {
