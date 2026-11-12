@@ -1,3 +1,4 @@
+import '@/utils/polyfills';
 import { useEffect, useState, useRef } from 'react';
 import { Stack, usePathname } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
